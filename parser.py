@@ -1,5 +1,9 @@
-def main():
-    print("Hello, World!")
+from loguru import logger
 
-if __name__ == '__main__':
+
+def main() -> None:
+    logger.info("Hello, World!")
+
+
+if __name__ == "__main__":
     main()
