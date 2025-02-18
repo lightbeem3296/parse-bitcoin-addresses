@@ -20,7 +20,6 @@ ignore = [
 ] # TODO leave only "COM812", "ANN102", "UP040" in ignores
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.11"
 strict = true
 ignore_missing_imports = true
-plugins = ["pydantic.mypy"]

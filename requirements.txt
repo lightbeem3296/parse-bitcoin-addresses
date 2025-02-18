@@ -1,3 +1,8 @@
+base58==2.1.1
+bech32==1.2.0
 loguru==0.7.3
 mypy==1.15.0
+psycopg2==2.9.10
+pycryptodome==3.21.0
+pymongo==4.11.1
 ruff==0.9.6
