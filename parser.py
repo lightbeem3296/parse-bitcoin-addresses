@@ -1,3 +1,4 @@
+import json
 from hashlib import sha256
 from typing import Any
 
@@ -7,6 +8,8 @@ from bech32 import bech32_encode, convertbits
 from Crypto.Hash import RIPEMD160
 from loguru import logger
 from pymongo import MongoClient
+from pymongo.errors import BulkWriteError
+from pymongo.results import InsertManyResult  # noqa: TC002
 
 # MongoDB setup
 MONGO_CLIENT: MongoClient[dict[str, Any]] = MongoClient("mongodb://localhost:27017/")
@@ -131,8 +134,8 @@ def parse_witness(witness: bytes) -> list[bytes]:
     return [witness]
 
 
-# Function to fetch unique addresses
-def get_unique_addresses() -> set[str]:
+# Function to fetch addresses
+def get_addresses() -> set[str]:
     # Fetch addresses from txouts (scriptpubkey)
     PG_CURSOR.execute("""
         SELECT scriptpubkey
@@ -149,45 +152,51 @@ def get_unique_addresses() -> set[str]:
     """)
     txin_addresses = [[row[0].tobytes(), row[1].tobytes()] for row in PG_CURSOR.fetchall()]
 
-    all_addresses = set()
+    all_addresses: list[str] = []
 
     # Process txouts (scriptpubkey)
     for row in addresses:
         scriptpubkey = row[0]
         address = extract_address_from_scriptpubkey(scriptpubkey)
         if address:
-            all_addresses.add(address)
+            all_addresses.append(address)
 
     # Process txins (scriptsig, witness)
     for row in txin_addresses:
         scriptsig, witness = row
         address = extract_address_from_scriptsig_and_witness(scriptsig, witness)
         if address:
-            all_addresses.add(address)
+            all_addresses.append(address)
 
-    return list(all_addresses)
+    return all_addresses
 
 
 # Function to write to MongoDB
 def write_addresses_to_mongo(addresses: list[str]) -> None:
-    for address in addresses:
-        # Create a document with a unique address
-        document = {"address": address}
-        # Insert into MongoDB collection
-        MONGO_COLLECTION.update_one({"address": address}, {"$set": document}, upsert=True)
+    try:
+        res: InsertManyResult = MONGO_COLLECTION.insert_many(
+            [{"address": address} for address in addresses],
+            ordered=False,
+        )
+        logger.info(f"{len(res.inserted_ids)} addresses written to MongoDB.")
+    except BulkWriteError as e:
+        logger.error(f"Failed to write addresses to MongoDB: {json.dumps(e.details, indent=2, default=str)}")
 
 
 def main() -> None:
-    # Fetch unique addresses and write to MongoDB
-    unique_addresses = get_unique_addresses()
-    write_addresses_to_mongo(unique_addresses)
+    # Set up Index & Unique
+    MONGO_COLLECTION.create_index([("address", 1)], unique=True)
+
+    # Fetch addresses and write to MongoDB
+    addresses = get_addresses()
+    write_addresses_to_mongo(addresses)
 
     # Close connections
     PG_CURSOR.close()
     PG_CONN.close()
     MONGO_CLIENT.close()
 
-    logger.info(f"{len(unique_addresses)} unique addresses written to MongoDB.")
+    logger.info(f"{len(addresses)} unique addresses written to MongoDB.")
 
 
 if __name__ == "__main__":
