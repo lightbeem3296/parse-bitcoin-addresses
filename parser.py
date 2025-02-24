@@ -116,8 +116,16 @@ def extract_address_from_scriptpubkey(scriptpubkey: bytes) -> str | None:  # noq
         return encode_segwit(hrp, witness_program)  # Bech32 encoding
     if scriptpubkey[:1] == b"\x41":  # P2PK (Pay-to-PubKey) - Length byte + public key
         # P2PK directly pays to a public key (not often used in addresses)
-        # Not commonly seen in plain text Bitcoin addresses
-        return None
+        pubkey = scriptpubkey[1:34]
+        if scriptpubkey[1] == 0x02 or scriptpubkey[1] == 0x03:  # Compressed  # noqa: PLR2004
+            pubkey = scriptpubkey[1:33]
+        elif scriptpubkey[1] == 0x04:  # Uncompressed  # noqa: PLR2004
+            pubkey = scriptpubkey[1:66]
+        pubkey_hash = digest(digest(pubkey, "sha256"), "ripemd160")
+        payload = b"\x00" + pubkey_hash  # Add prefix for Mainnet address (0x00)
+        checksum = digest(digest(payload, "sha256"), "sha256")[:4]  # Calculate checksum
+        payload += checksum  # Add checksum
+        return base58.b58encode(payload).decode("utf-8")
     if scriptpubkey[:1] == b"\x51":  # P2TR (Taproot)
         # Bech32m encoding for Taproot addresses (bc1p)
         hrp = "bc"  # Human-readable prefix for Bitcoin mainnet (bc)
