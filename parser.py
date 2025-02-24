@@ -11,6 +11,9 @@ from pymongo import MongoClient
 from pymongo.errors import BulkWriteError
 from pymongo.results import InsertManyResult  # noqa: TC002
 
+# Consts
+BATCH_SIZE = 100
+
 # MongoDB setup
 MONGO_CLIENT: MongoClient[dict[str, Any]] = MongoClient("mongodb://localhost:27017/")
 MONGO_DB = MONGO_CLIENT["bitcoin_db"]
@@ -135,27 +138,31 @@ def parse_witness(witness: bytes) -> list[bytes]:
 
 
 # Function to fetch addresses
-def get_addresses() -> set[str]:
+def get_addresses(offset: int, batch_size: int) -> tuple[list[str], bool]:
     # Fetch addresses from txouts (scriptpubkey)
-    PG_CURSOR.execute("""
+    PG_CURSOR.execute(f"""
         SELECT scriptpubkey
         FROM public.txouts
-        WHERE scriptpubkey IS NOT NULL;
-    """)
-    addresses = [[row[0].tobytes()] for row in PG_CURSOR.fetchall()]
+        WHERE scriptpubkey IS NOT NULL
+        LIMIT {batch_size}
+        OFFSET {offset};
+    """)  # noqa: S608
+    txout_addresses = [[row[0].tobytes()] for row in PG_CURSOR.fetchall()]
 
     # Fetch addresses from txins (scriptsig, witness)
-    PG_CURSOR.execute("""
+    PG_CURSOR.execute(f"""
         SELECT scriptsig, witness
         FROM public.txins
-        WHERE scriptsig IS NOT NULL AND witness IS NOT NULL;
-    """)
+        WHERE scriptsig IS NOT NULL AND witness IS NOT NULL
+        LIMIT {batch_size}
+        OFFSET {offset}
+    """)  # noqa: S608
     txin_addresses = [[row[0].tobytes(), row[1].tobytes()] for row in PG_CURSOR.fetchall()]
 
     all_addresses: list[str] = []
 
     # Process txouts (scriptpubkey)
-    for row in addresses:
+    for row in txout_addresses:
         scriptpubkey = row[0]
         address = extract_address_from_scriptpubkey(scriptpubkey)
         if address:
@@ -168,35 +175,51 @@ def get_addresses() -> set[str]:
         if address:
             all_addresses.append(address)
 
-    return all_addresses
+    return all_addresses, len(txout_addresses) == batch_size or len(txin_addresses) == batch_size
 
 
 # Function to write to MongoDB
 def write_addresses_to_mongo(addresses: list[str]) -> None:
     try:
-        res: InsertManyResult = MONGO_COLLECTION.insert_many(
-            [{"address": address} for address in addresses],
-            ordered=False,
-        )
-        logger.info(f"{len(res.inserted_ids)} addresses written to MongoDB.")
+        if addresses:
+            res: InsertManyResult = MONGO_COLLECTION.insert_many(
+                [{"address": address} for address in addresses],
+                ordered=False,
+            )
+            logger.info(f"{len(res.inserted_ids)} addresses written to MongoDB.")
+        else:
+            logger.info("No addresses written to MongoDB.")
     except BulkWriteError as e:
         logger.error(f"Failed to write addresses to MongoDB: {json.dumps(e.details, indent=2, default=str)}")
+
+
+def process_address(offset: int, batch_size: int) -> bool:
+    ret = False
+
+    addresses, ret = get_addresses(offset=offset, batch_size=batch_size)
+    write_addresses_to_mongo(addresses)
+    logger.info(f"{len(addresses)} unique addresses written to MongoDB.")
+
+    return ret
 
 
 def main() -> None:
     # Set up Index & Unique
     MONGO_COLLECTION.create_index([("address", 1)], unique=True)
 
-    # Fetch addresses and write to MongoDB
-    addresses = get_addresses()
-    write_addresses_to_mongo(addresses)
+    # Process Address
+    offset = 0
+    batch_size = BATCH_SIZE
+    while True:
+        logger.info(f"offset: {offset}, batch_size: {batch_size}")
+        if not process_address(offset=offset, batch_size=batch_size):
+            break
+        offset += batch_size
 
     # Close connections
     PG_CURSOR.close()
     PG_CONN.close()
     MONGO_CLIENT.close()
-
-    logger.info(f"{len(addresses)} unique addresses written to MongoDB.")
 
 
 if __name__ == "__main__":
